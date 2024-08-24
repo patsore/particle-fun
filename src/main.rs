@@ -1,22 +1,32 @@
-mod egui_tools;
+extern crate core;
 
-use crate::egui_tools::EguiRenderer;
-use egui_wgpu::wgpu::{InstanceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat};
-use egui_wgpu::{wgpu, ScreenDescriptor};
 use std::sync::Arc;
+use std::time::Duration;
+
+use egui_wgpu::{ScreenDescriptor, wgpu};
+use egui_wgpu::wgpu::{InstanceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat};
+use glam::Vec3;
+use tokio::time::Instant;
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::CursorGrabMode;
 
-fn main() {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        pollster::block_on(run());
-    }
-}
+use crate::egui_tools::EguiRenderer;
 
-async fn run() {
+mod egui_tools;
+mod renderer;
+mod vector;
+mod camera;
+mod models;
+mod texture;
+mod state;
+mod utils;
+mod fluid_vec;
+
+#[tokio::main]
+async fn main() {
     let event_loop = EventLoop::new().unwrap();
 
     let builder = winit::window::WindowBuilder::new();
@@ -24,7 +34,10 @@ async fn run() {
     let window = Arc::new(window);
     let initial_width = 1360;
     let initial_height = 768;
-    window.request_inner_size(PhysicalSize::new(initial_width, initial_height));
+    let _ = window.request_inner_size(PhysicalSize::new(initial_width, initial_height));
+    window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
+
+
     let instance = egui_wgpu::wgpu::Instance::new(InstanceDescriptor::default());
     let surface = instance
         .create_surface(window.clone())
@@ -51,6 +64,7 @@ async fn run() {
         )
         .await
         .expect("Failed to create device");
+    let queue = Arc::new(queue);
 
     let swapchain_capabilities = surface.get_capabilities(&adapter);
     let selected_format = TextureFormat::Bgra8UnormSrgb;
@@ -75,30 +89,83 @@ async fn run() {
 
     let mut egui_renderer = EguiRenderer::new(&device, config.format, None, 1, &window);
 
-    let mut close_requested = false;
-    let mut modifiers = ModifiersState::default();
+    let (mut camera, camera_bind_group_layout) = crate::camera::CameraBundle::new(camera::Camera {
+        pos: Vec3::new(0.0, 1.0, 0.0),
+        rotation: (0.0, 0.0),
+        up: Vec3::Y,
+        aspect_ratio: 1360.0 / 768.0,
+        fov_y: 45.0,
+        z_near: 0.1,
+        z_far: 1.0,
+    }, &device, queue.clone());
+
+    let (camera_buffer, camera_bind_group) = camera.get_gpu_side();
+
+    let mut state = state::State::new(&device, queue.clone());
+
+    let (vector_buffer, vertex_buffer, index_buffer) = state.get_buffers();
+
+    let (vectors, indices) = state.get_lengths();
+    tokio::spawn(async move {
+        let desired_tps = 500;
+        let interval = Duration::from_millis(1000 / desired_tps);
+        let mut next_time = Instant::now() + interval;
+        loop {
+            state.run_sim();
+            tokio::time::sleep_until(next_time).await;
+            next_time += interval;
+        }
+    });
+
+    let mut renderer = renderer::Renderer::new(
+        &device,
+        &config,
+        &[&camera_bind_group_layout],
+        camera_buffer,
+        camera_bind_group,
+        vectors,
+        vector_buffer,
+        vertex_buffer,
+        indices,
+        index_buffer,
+    );
+
 
     let mut scale_factor = 1.0;
-
+    let mut process_inputs = true;
+    let mut modifiers = ModifiersState::default();
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
+        camera.winit_input_helper.update(&event);
 
         match event {
             Event::WindowEvent { event, .. } => {
                 egui_renderer.handle_input(&window, &event);
-
                 match event {
                     WindowEvent::CloseRequested => {
-                        close_requested = true;
+                        elwt.exit();
                     }
                     WindowEvent::ModifiersChanged(new) => {
-                        modifiers = new.state();
+                        modifiers = new.state()
                     }
                     WindowEvent::KeyboardInput {
                         event: kb_event, ..
                     } => {
-                        if kb_event.logical_key == Key::Named(NamedKey::Escape) {
-                            close_requested = true;
+                        match kb_event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                if modifiers.shift_key() {
+                                    process_inputs = true;
+                                    window.set_cursor_grab(CursorGrabMode::Confined)
+                                        .or_else(|_e| window.set_cursor_grab(CursorGrabMode::Locked))
+                                        .unwrap();
+                                } else if modifiers.alt_key() {
+                                    elwt.exit();
+                                } else {
+                                    process_inputs = false;
+                                    window.set_cursor_grab(CursorGrabMode::None).unwrap();
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     WindowEvent::ActivationTokenDone { .. } => {}
@@ -107,29 +174,13 @@ async fn run() {
                         config.width = new_size.width;
                         config.height = new_size.height;
                         surface.configure(&device, &config);
+                        camera.resize(&config);
+                        renderer.resize(&device, &config)
                     }
-                    WindowEvent::Moved(_) => {}
-                    WindowEvent::Destroyed => {}
-                    WindowEvent::DroppedFile(_) => {}
-                    WindowEvent::HoveredFile(_) => {}
-                    WindowEvent::HoveredFileCancelled => {}
-                    WindowEvent::Focused(_) => {}
-                    WindowEvent::Ime(_) => {}
-                    WindowEvent::CursorMoved { .. } => {}
-                    WindowEvent::CursorEntered { .. } => {}
-                    WindowEvent::CursorLeft { .. } => {}
-                    WindowEvent::MouseWheel { .. } => {}
-                    WindowEvent::MouseInput { .. } => {}
-                    WindowEvent::TouchpadMagnify { .. } => {}
-                    WindowEvent::SmartMagnify { .. } => {}
-                    WindowEvent::TouchpadRotate { .. } => {}
-                    WindowEvent::TouchpadPressure { .. } => {}
-                    WindowEvent::AxisMotion { .. } => {}
-                    WindowEvent::Touch(_) => {}
-                    WindowEvent::ScaleFactorChanged { .. } => {}
-                    WindowEvent::ThemeChanged(_) => {}
-                    WindowEvent::Occluded(_) => {}
                     WindowEvent::RedrawRequested => {
+                        if process_inputs {
+                            camera.handle_inputs();
+                        }
                         let surface_texture = surface
                             .get_current_texture()
                             .expect("Failed to acquire next swap chain texture");
@@ -142,6 +193,8 @@ async fn run() {
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: None,
                             });
+                        // renderer.update(&queue);
+                        renderer.render(&mut encoder, &surface_view);
 
                         let screen_descriptor = ScreenDescriptor {
                             size_in_pixels: [config.width, config.height],
@@ -156,31 +209,13 @@ async fn run() {
                             &surface_view,
                             screen_descriptor,
                             |ctx| {
-                                egui::Window::new("winit + egui + wgpu says hello!")
-                                    .resizable(true)
-                                    .vscroll(true)
-                                    .default_open(false)
-                                    .show(ctx, |ui| {
-                                        ui.label("Label!");
-
-                                        if ui.button("Button!").clicked() {
-                                            println!("boom!")
-                                        }
-
-                                        ui.separator();
-                                        ui.horizontal(|ui| {
-                                            ui.label(format!(
-                                                "Pixels per point: {}",
-                                                ctx.pixels_per_point()
-                                            ));
-                                            if ui.button("-").clicked() {
-                                                scale_factor = (scale_factor - 0.1).max(0.3);
-                                            }
-                                            if ui.button("+").clicked() {
-                                                scale_factor = (scale_factor + 0.1).min(3.0);
-                                            }
-                                        });
-                                    });
+                                // egui::Window::new("")
+                                //     .resizable(true)
+                                //     .vscroll(true)
+                                //     .default_open(false)
+                                //     .show(ctx, |ui| {
+                                //         ui.label("I am so fucking tired");
+                                //     });
                             },
                         );
 
@@ -188,21 +223,10 @@ async fn run() {
                         surface_texture.present();
                         window.request_redraw();
                     }
+                    _ => {}
                 }
             }
-
-            Event::NewEvents(_) => {}
-            Event::DeviceEvent { .. } => {}
-            Event::UserEvent(_) => {}
-            Event::Suspended => {}
-            Event::Resumed => {}
-            Event::AboutToWait => {
-                if close_requested {
-                    elwt.exit()
-                }
-            }
-            Event::LoopExiting => {}
-            Event::MemoryWarning => {}
+            _ => {}
         }
-    });
+    }).unwrap();
 }
