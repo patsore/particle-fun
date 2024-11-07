@@ -1,20 +1,19 @@
 extern crate core;
 
+use std::f32::consts::PI;
 use std::sync::Arc;
-use std::time::Duration;
-
+use egui::Slider;
 use egui_wgpu::{ScreenDescriptor, wgpu};
 use egui_wgpu::wgpu::{InstanceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat};
+use egui_wgpu::wgpu::util::DeviceExt;
 use glam::Vec3;
-use tokio::time::Instant;
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::CursorGrabMode;
+use winit::window::{CursorGrabMode, Fullscreen};
 
 use crate::egui_tools::EguiRenderer;
-
 mod egui_tools;
 mod renderer;
 mod vector;
@@ -24,6 +23,7 @@ mod texture;
 mod state;
 mod utils;
 mod fluid_vec;
+mod compute;
 
 #[tokio::main]
 async fn main() {
@@ -36,7 +36,7 @@ async fn main() {
     let initial_height = 768;
     let _ = window.request_inner_size(PhysicalSize::new(initial_width, initial_height));
     window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
-
+    window.set_maximized(true);
 
     let instance = egui_wgpu::wgpu::Instance::new(InstanceDescriptor::default());
     let surface = instance
@@ -52,7 +52,7 @@ async fn main() {
         .await
         .expect("Failed to find an appropriate adapter");
 
-    let features = wgpu::Features::empty();
+    let features = wgpu::Features::POLYGON_MODE_POINT;
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
@@ -90,8 +90,8 @@ async fn main() {
     let mut egui_renderer = EguiRenderer::new(&device, config.format, None, 1, &window);
 
     let (mut camera, camera_bind_group_layout) = crate::camera::CameraBundle::new(camera::Camera {
-        pos: Vec3::new(0.0, 1.0, 0.0),
-        rotation: (0.0, 0.0),
+        pos: Vec3::new(0.0, 2.0, 3.0),
+        rotation: (0.0, PI / 6.0),
         up: Vec3::Y,
         aspect_ratio: 1360.0 / 768.0,
         fov_y: 45.0,
@@ -101,39 +101,45 @@ async fn main() {
 
     let (camera_buffer, camera_bind_group) = camera.get_gpu_side();
 
-    let mut state = state::State::new(&device, queue.clone());
+    let point_buffer_rust: Vec<[f32; 4]> = (0..8_388_608).map(|i| {
+        let phi = std::f32::consts::PI * (3.0 - (5.0f32).sqrt()); // Golden angle
+        let y = 1.0 - (2.0 * i as f32 / 8_388_608.0); // y-coordinate from -1 to 1
+        let radius = (1.0 - y * y).sqrt(); // radius at this y level
+        let theta = phi * i as f32; // azimuthal angle
 
-    let (vector_buffer, vertex_buffer, index_buffer) = state.get_buffers();
+        let x = radius * theta.cos();
+        let z = radius * theta.sin();
 
-    let (vectors, indices) = state.get_lengths();
-    tokio::spawn(async move {
-        let desired_tps = 500;
-        let interval = Duration::from_millis(1000 / desired_tps);
-        let mut next_time = Instant::now() + interval;
-        loop {
-            state.run_sim();
-            tokio::time::sleep_until(next_time).await;
-            next_time += interval;
-        }
-    });
+        [x, y, z, 1.0]
+    }).collect::<Vec<_>>();
 
+    //create a buffer that will create a force acting perpendicular to the radius of the sphere
+
+
+    let point_buffer = Arc::new(device.create_buffer_init(&egui_wgpu::wgpu::util::BufferInitDescriptor {
+        label: Some("Point Buffer"),
+        contents: bytemuck::cast_slice(point_buffer_rust.as_slice()),
+        usage: wgpu::BufferUsages::VERTEX | egui_wgpu::wgpu::BufferUsages::STORAGE,
+    }));
+
+    let point_buffer_size = point_buffer_rust.len() as u32;
     let mut renderer = renderer::Renderer::new(
         &device,
         &config,
         &[&camera_bind_group_layout],
         camera_buffer,
         camera_bind_group,
-        vectors,
-        vector_buffer,
-        vertex_buffer,
-        indices,
-        index_buffer,
+        point_buffer.clone(),
+        point_buffer_size,
     );
 
+    let mut compute = crate::compute::Compute::new(&device, point_buffer.clone(), point_buffer_size);
 
     let mut scale_factor = 1.0;
     let mut process_inputs = true;
     let mut modifiers = ModifiersState::default();
+    let mut v1 = 0.005_f32;
+    let mut v2 = 0.50_f32;
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
         camera.winit_input_helper.update(&event);
@@ -193,7 +199,8 @@ async fn main() {
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: None,
                             });
-                        // renderer.update(&queue);
+
+                        compute.compute(&mut encoder, &queue);
                         renderer.render(&mut encoder, &surface_view);
 
                         let screen_descriptor = ScreenDescriptor {
@@ -209,15 +216,29 @@ async fn main() {
                             &surface_view,
                             screen_descriptor,
                             |ctx| {
-                                // egui::Window::new("")
-                                //     .resizable(true)
-                                //     .vscroll(true)
-                                //     .default_open(false)
-                                //     .show(ctx, |ui| {
-                                //         ui.label("I am so fucking tired");
-                                //     });
+                                egui::Window::new("")
+                                    .resizable(true)
+                                    .vscroll(true)
+                                    .default_open(false)
+                                    .show(ctx, |ui| {
+                                        let v1 = Slider::new(&mut v1, 0.0..=1.0)
+                                            .text("Lower bound of threshold")
+                                            .drag_value_speed(0.01);
+                                        ui.add(v1);
+
+                                        let v2 = Slider::new(&mut v2, 0.0..=1.0)
+                                            .text("Lower bound of threshold")
+                                            .drag_value_speed(0.01);
+                                        ui.add(v2);
+                                    });
                             },
                         );
+
+                        compute.inputs.c1 = v1;
+                        compute.inputs.c2 = v2;
+
+
+                        compute.update_inputs(&queue);
 
                         queue.submit(Some(encoder.finish()));
                         surface_texture.present();

@@ -47,28 +47,22 @@ impl Vertex for ModelVertex {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct TestVertex {
-    pub position: [f32; 3],
-    pub color: [f32;4],
+pub struct CloudPoint {
+    pub position: [f32;4],
 }
 
-impl Vertex for TestVertex {
+impl Vertex for CloudPoint {
     fn desc() -> VertexBufferLayout<'static> {
         use std::mem;
         VertexBufferLayout {
-            array_stride: mem::size_of::<TestVertex>() as BufferAddress,
+            array_stride: mem::size_of::<CloudPoint>() as BufferAddress,
             step_mode: VertexStepMode::Vertex,
             attributes: &[
                 VertexAttribute {
                     offset: 0,
-                    shader_location: 6,
-                    format: VertexFormat::Float32x3,
-                },
-                VertexAttribute {
-                    offset: mem::size_of::<[f32;3]>() as BufferAddress,
-                    shader_location: 7,
+                    shader_location: 0,
                     format: VertexFormat::Float32x4,
-                },
+                }
             ],
         }
     }

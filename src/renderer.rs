@@ -3,7 +3,7 @@ use std::sync::Arc;
 use egui_wgpu::wgpu::{BindGroup, BindGroupLayout, BlendState, Buffer, Color, ColorTargetState, CommandEncoder, CompareFunction, DepthBiasState, DepthStencilState, Device, Face, FragmentState, FrontFace, include_wgsl, IndexFormat, LoadOp, Operations, PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, StencilState, StoreOp, SurfaceConfiguration, TextureView, VertexState};
 use egui_wgpu::wgpu::TextureFormat::Bgra8UnormSrgb;
 
-use crate::models::{TestVertex, Vertex};
+use crate::models::{CloudPoint, Vertex};
 use crate::vector::Vector;
 
 pub struct Renderer {
@@ -16,14 +16,8 @@ pub struct Renderer {
     camera_buffer: Arc<Buffer>,
     camera_bind_group: Arc<BindGroup>,
 
-    //Data
-    vectors: usize,
-    vector_buffer: Arc<Buffer>,
-
-    pub vertex_buffer: Arc<Buffer>,
-
-    pub indices: usize,
-    pub index_buffer: Arc<Buffer>,
+    point_buffer: Arc<Buffer>,
+    point_buffer_size: u32,
 }
 
 impl Renderer {
@@ -33,12 +27,8 @@ impl Renderer {
         bind_group_layouts: &[&BindGroupLayout],
         camera_buffer: Arc<Buffer>,
         camera_bind_group: Arc<BindGroup>,
-        vectors: usize,
-        vector_buffer: Arc<Buffer>,
-        vertex_buffer: Arc<Buffer>,
-        indices: usize,
-        index_buffer: Arc<Buffer>,
-
+        point_buffer: Arc<Buffer>,
+        point_buffer_size: u32,
     ) -> Self {
         //+X is R, +Y is U, +Z is B
         let depth_texture = crate::texture::Texture::create_depth_texture(&device, config, "depth_texture");
@@ -61,15 +51,15 @@ impl Renderer {
                     entry_point: "vs_main",
                     compilation_options: Default::default(),
                     buffers: &[
-                        TestVertex::desc(), Vector::DESC
+                        CloudPoint::desc()
                     ],
                 },
                 primitive: PrimitiveState {
-                    topology: PrimitiveTopology::TriangleList,
+                    topology: PrimitiveTopology::PointList,
                     strip_index_format: None,
                     front_face: FrontFace::Ccw,
-                    cull_mode: Some(Face::Back),
-                    polygon_mode: PolygonMode::default(),
+                    cull_mode: None,
+                    polygon_mode: PolygonMode::Point,
                     unclipped_depth: false,
                     conservative: false,
                 },
@@ -104,12 +94,8 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
 
-            vectors,
-            vector_buffer,
-
-            indices,
-            vertex_buffer,
-            index_buffer,
+            point_buffer,
+            point_buffer_size,
         }
     }
 
@@ -143,11 +129,9 @@ impl Renderer {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.vector_buffer.slice(..));
+            render_pass.set_vertex_buffer(0, self.point_buffer.slice(..));
 
-            render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
-            render_pass.draw_indexed(0..self.indices as u32, 0, 0..self.vectors as u32);
+            render_pass.draw(0..self.point_buffer_size, 0..1);
         }
     }
 

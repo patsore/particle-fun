@@ -23,15 +23,15 @@ pub(crate) struct CameraBundle {
 
 impl CameraBundle {
     pub fn new(camera: Camera, device: &wgpu::Device, queue: Arc<wgpu::Queue>) -> (Self, BindGroupLayout) {
-        let camera = Camera {
-            pos: Vec3::new(0.0, 1.0, 0.0),
-            rotation: (0.0, 0.0),
-            up: Vec3::Y,
-            aspect_ratio: 1360.0 / 768.0,
-            fov_y: 45.0,
-            z_near: 0.1,
-            z_far: 1.0,
-        };
+        // let camera = Camera {
+        //     pos: Vec3::new(0.0, 1.0, 0.0),
+        //     rotation: (0.0, 0.0),
+        //     up: Vec3::Y,
+        //     aspect_ratio: 1360.0 / 768.0,
+        //     fov_y: 45.0,
+        //     z_near: 0.1,
+        //     z_far: 1.0,
+        // };
 
         let camera_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Camera Buffer"),
